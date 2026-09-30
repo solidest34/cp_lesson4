@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MiniMaple</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);
+--bg:#fafaf7;--fg:#1d1d1b;--mut:#6b6b66;--card:#fff;--bd:#d9d9d2;--ac:#2f6f4f;--ok:#2f6f4f;--bad:#b3261e}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#171716;--fg:#ecece6;--mut:#9a9a92;--card:#212120;--bd:#3a3a37;--ac:#6fbf94;--ok:#6fbf94;--bad:#f2867f}}
+:root[data-theme="dark"]{--bg:#171716;--fg:#ecece6;--mut:#9a9a92;--card:#212120;--bd:#3a3a37;--ac:#6fbf94;--ok:#6fbf94;--bad:#f2867f}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:640px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:22px;margin:0 0 4px}p.s{color:var(--mut);margin:0 0 20px;font-size:14px}
+.row{display:flex;gap:8px}
+input{flex:1;min-width:0;padding:10px 12px;font:16px ui-monospace,Menlo,Consolas,monospace;border:1px solid var(--bd);border-radius:8px;background:var(--card);color:var(--fg)}
+button{padding:10px 18px;border:0;border-radius:8px;background:var(--ac);color:var(--bg);font:600 15px system-ui;cursor:pointer}
+#out{margin-top:16px;padding:14px;border:1px solid var(--bd);border-radius:8px;background:var(--card);font:16px ui-monospace,Menlo,Consolas,monospace;min-height:1.5em;overflow-x:auto;word-break:break-all}
+#out.err{color:var(--bad)}
+h2{font-size:15px;margin:32px 0 8px;color:var(--mut)}
+#tests{font:13px ui-monospace,Menlo,Consolas,monospace;overflow-x:auto}
+#tests div{padding:1px 0}.ok{color:var(--ok)}.bad{color:var(--bad)}
+</style>
+</head>
+<body>
+<main>
+<h1>MiniMaple</h1>
+<p class="s">Формат: <code>выражение, переменная</code> — например <code>4*x^3-x^2, x</code>. Операции: + - * ^ и скобки.</p>
+<div class="row">
+  <input id="in" value="4*x^3-x^2, x" autocomplete="off" spellcheck="false">
+  <button id="run">Diff</button>
+</div>
+<div id="out"></div>
+<h2>Тесты</h2>
+<div id="tests"></div>
+</main>
+<script>
+// ================= TESTS (written first, TDD) =================
+// Each case: [input expression, variable, expected output]  or  [expr, var, Error]
+const CASES = [
+  ['4*x^3', 'x', '12*x^2'],
+  ['4*x^3', 'y', '0'],
+  ['4*x^3-x^2', 'x', '12*x^2 - 2*x'],
+  ['5', 'x', '0'],
+  ['x', 'x', '1'],
+  ['3*x^2 + 2*x + 1', 'x', '6*x + 2'],
+  ['-x^2', 'x', '-2*x'],
+  ['x^0', 'x', '0'],
+  ['x*y', 'y', 'x'],
+  ['x^2*y', 'x', '2*x*y'],
+  ['(x+1)^2', 'x', '2*x + 2'],
+  ['(x+1)*(x-1)', 'x', '2*x'],
+  ['x - x', 'x', '0'],
+  ['2^3*x', 'x', '8'],
+  ['x^2^2', 'x', '4*x^3'],
+  ['0.5*x^2', 'x', 'x'],
+  // errors
+  ['sin(x)', 'x', Error],
+  ['x/2', 'x', Error],
+  ['x^y', 'x', Error],
+  ['x^-1', 'x', Error],
+  ['x^0.5', 'x', Error],
+  ['(x+1', 'x', Error],
+  ['x +', 'x', Error],
+  ['x y', 'x', Error],
+  ['', 'x', Error],
+  ['x^2 @', 'x', Error],
+  ['x^2', '2x', Error],
+];
+
+function runTests() {
+  const box = document.getElementById('tests');
+  let pass = 0;
+  for (const [e, v, exp] of CASES) {
+    let got, ok;
+    try { got = diff(e, v); ok = got === exp; }
+    catch (err) { got = 'Error: ' + err.message; ok = exp === Error && err instanceof MiniMapleError; }
+    pass += ok;
+    const d = document.createElement('div');
+    d.className = ok ? 'ok' : 'bad';
+    d.textContent = (ok ? '✓ ' : '✗ ') + `diff(${JSON.stringify(e)}, ${v}) ` + (ok ? '' : `→ ${got}, expected ${exp === Error ? 'Error' : exp}`);
+    box.appendChild(d);
+  }
+  const s = document.createElement('div');
+  s.style.cssText = 'margin-top:8px;font-weight:600';
+  s.className = pass === CASES.length ? 'ok' : 'bad';
+  s.textContent = `${pass}/${CASES.length} passed`;
+  box.prepend(s);
+}
+
+// ================= IMPLEMENTATION =================
+class MiniMapleError extends Error {}
+const fail = m => { throw new MiniMapleError(m); };
+
+// Polynomial = Map<key, {c: coefficient, m: {var: power}}>
+const keyOf = m => Object.keys(m).sort().map(v => v + '^' + m[v]).join('*');
+const constant = c => { const p = new Map(); if (c !== 0) p.set('', { c, m: {} }); return p; };
+const variable = n => new Map([[keyOf({ [n]: 1 }), { c: 1, m: { [n]: 1 } }]]);
+
+function add(a, b) {
+  const r = new Map();
+  for (const [k, t] of a) r.set(k, { c: t.c, m: { ...t.m } });
+  for (const [k, t] of b) {
+    if (r.has(k)) { r.get(k).c += t.c; if (r.get(k).c === 0) r.delete(k); }
+    else r.set(k, { c: t.c, m: { ...t.m } });
+  }
+  return r;
+}
+const neg = a => mul(a, constant(-1));
+function mul(a, b) {
+  let r = new Map();
+  for (const x of a.values()) for (const y of b.values()) {
+    const m = { ...x.m };
+    for (const v in y.m) m[v] = (m[v] || 0) + y.m[v];
+    r = add(r, new Map([[keyOf(m), { c: x.c * y.c, m }]]));
+  }
+  return r;
+}
+function pow(b, e) {
+  let n;
+  if (e.size === 0) n = 0;
+  else if (e.size === 1 && e.has('')) n = e.get('').c;
+  else fail('Exponent must be a constant number');
+  if (!Number.isInteger(n) || n < 0) fail('Exponent must be a non-negative integer');
+  if (n > 200) fail('Exponent is too large');
+  let r = constant(1);
+  for (let i = 0; i < n; i++) r = mul(r, b);
+  return r;
+}
+
+function tokenize(s) {
+  const re = /\s*(?:(\d+(?:\.\d+)?)|([A-Za-z_]\w*)|([-+*^()]))/y;
+  const out = []; let pos = 0;
+  while (pos < s.length) {
+    if (/^\s*$/.test(s.slice(pos))) break;
+    re.lastIndex = pos;
+    const m = re.exec(s);
+    if (!m) fail(`Unexpected character "${s.slice(pos).trim()[0]}"`);
+    out.push(m[1] !== undefined ? { k: 'num', v: +m[1] } : m[2] !== undefined ? { k: 'id', v: m[2] } : { k: 'op', v: m[3] });
+    pos = re.lastIndex;
+  }
+  return out;
+}
+
+function parse(src) {
+  const t = tokenize(src); let i = 0;
+  const isOp = (...o) => t[i] && t[i].k === 'op' && o.includes(t[i].v);
+  function expr() {
+    let r = term();
+    while (isOp('+', '-')) { const op = t[i++].v; const b = term(); r = add(r, op === '+' ? b : neg(b)); }
+    return r;
+  }
+  function term() {
+    let r = unary();
+    while (isOp('*')) { i++; r = mul(r, unary()); }
+    return r;
+  }
+  function unary() {
+    if (isOp('-', '+')) { const op = t[i++].v; const a = unary(); return op === '-' ? neg(a) : a; }
+    return power();
+  }
+  function power() {
+    const b = atom();
+    if (isOp('^')) { i++; return pow(b, unary()); } // right-associative
+    return b;
+  }
+  function atom() {
+    const k = t[i++];
+    if (!k) fail('Unexpected end of expression');
+    if (k.k === 'num') return constant(k.v);
+    if (k.k === 'id') return variable(k.v);
+    if (k.v === '(') { const r = expr(); if (!isOp(')')) fail('Missing ")"'); i++; return r; }
+    fail(`Unexpected "${k.v}"`);
+  }
+  if (!t.length) fail('Empty expression');
+  const r = expr();
+  if (i < t.length) fail(`Unexpected "${t[i].v}"`);
+  return r;
+}
+
+function derive(p, v) {
+  let r = new Map();
+  for (const { c, m } of p.values()) {
+    if (!m[v]) continue;
+    const n = { ...m }; n[v]--; if (n[v] === 0) delete n[v];
+    r = add(r, new Map([[keyOf(n), { c: c * m[v], m: n }]]));
+  }
+  return r;
+}
+
+function format(p) {
+  if (p.size === 0) return '0';
+  const num = c => String(+c.toFixed(12));
+  const terms = [...p.values()].sort((a, b) => {
+    const da = Object.values(a.m).reduce((s, x) => s + x, 0), db = Object.values(b.m).reduce((s, x) => s + x, 0);
+    return db - da || (keyOf(a.m) < keyOf(b.m) ? -1 : 1);
+  });
+  return terms.map((t, idx) => {
+    const vars = Object.keys(t.m).sort().map(v => t.m[v] === 1 ? v : `${v}^${t.m[v]}`).join('*');
+    const a = Math.abs(t.c);
+    const body = !vars ? num(a) : a === 1 ? vars : `${num(a)}*${vars}`;
+    return idx === 0 ? (t.c < 0 ? '-' : '') + body : (t.c < 0 ? ' - ' : ' + ') + body;
+  }).join('');
+}
+
+function diff(expression, v) {
+  v = String(v).trim();
+  if (!/^[A-Za-z_]\w*$/.test(v)) fail('Invalid variable name');
+  return format(derive(parse(expression), v));
+}
+
+// "expr, var" -> result string
+function run(input) {
+  const i = input.lastIndexOf(',');
+  if (i < 0) fail('Expected "expression, variable"');
+  return diff(input.slice(0, i), input.slice(i + 1));
+}
+
+// ================= UI =================
+const inp = document.getElementById('in'), out = document.getElementById('out');
+function go() {
+  try { out.className = ''; out.textContent = run(inp.value); }
+  catch (e) {
+    if (!(e instanceof MiniMapleError)) throw e;
+    out.className = 'err'; out.textContent = 'Error: ' + e.message;
+  }
+}
+document.getElementById('run').onclick = go;
+inp.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+go(); runTests();
+</script>
+</body>
+</html>
